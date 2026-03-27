@@ -1,0 +1,22 @@
+name: maju_jaya_platform
+version: '1.0.0'
+profile: maju_jaya
+
+models:
+  maju_jaya_platform:
+    staging:
+      +materialized: view
+
+    intermediate:
+      +materialized: ephemeral
+
+    marts:
+      core:
+        +materialized: table
+      serving:
+        +materialized: table
+
+clean-targets:
+  - target
+  - dbt_packages
+  - logs

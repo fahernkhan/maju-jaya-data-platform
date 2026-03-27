@@ -1,0 +1,36 @@
+version: 2
+
+models:
+  - name: stg_customers
+    description: "Cleaned customer data. DOB standardized, type classified."
+    columns:
+      - name: customer_id
+        description: "PK - unique customer identifier"
+        tests: [unique, not_null]
+      - name: customer_type
+        tests:
+          - accepted_values:
+              values: ['individual', 'corporate']
+
+  - name: stg_sales
+    description: "Cleaned sales data. Price as integer, duplicates flagged."
+    columns:
+      - name: vin
+        description: "PK - Vehicle Identification Number"
+        tests: [unique, not_null]
+      - name: price
+        tests:
+          - not_null
+
+  - name: stg_after_sales
+    description: "Cleaned after-sales data. Orphan VIN and future dates flagged."
+    columns:
+      - name: service_ticket
+        description: "PK - unique service ticket"
+        tests: [unique, not_null]
+
+  - name: stg_customer_addresses
+    description: "Latest address per customer from daily CSV ingestion."
+    columns:
+      - name: customer_id
+        tests: [not_null]

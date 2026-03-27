@@ -1,0 +1,69 @@
+.env
+__pycache__/
+*.pyc
+airflow/logs/
+data_quality/great_expectations/uncommitted/
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+*.egg-info/
+.DS_Store
+
+#OTHER
+.qodo
+credentials/
+terraform/terraform.tfstate
+
+# ── ENV & SECRETS ─────────────────────────────
+.env
+*.env
+credentials/
+*.json
+
+# ── TERRAFORM ────────────────────────────────
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+terraform/.terraform
+
+# ── PYTHON ───────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# ── DATA (RAW / LOCAL) ───────────────────────
+data/
+*.csv
+*.xlsx
+*.parquet
+
+# ── AIRFLOW ─────────────────────────────────
+airflow/logs/
+airflow/*.pid
+
+# ── DBT ─────────────────────────────────────
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+
+# ── SYSTEM FILES ─────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── EDITOR ──────────────────────────────────
+.vscode/
+.idea/
+/home/fahernkhan/Documents/data_engineer/maju-jaya-data-platform/dbt/profiles.ymlprofiles.yml
+
+# DBT SECRET
+dbt/profiles.yml
+**/profiles.yml
+credentials/
+*.json
+.env copy
+dbt/profiles copy.yml
+dbt/.user.yml

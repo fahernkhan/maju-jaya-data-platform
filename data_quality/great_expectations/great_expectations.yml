@@ -1,0 +1,12 @@
+config_version: 3.0
+datasources:
+  mysql_datasource:
+    class_name: Datasource
+    execution_engine:
+      class_name: SqlAlchemyExecutionEngine
+      connection_string: "mysql+pymysql://maju_jaya:maju_jaya_pass@localhost:3306/maju_jaya"
+    data_connectors:
+      default_runtime_data_connector_name:
+        class_name: RuntimeDataConnector
+        batch_identifiers:
+          - default_identifier_name

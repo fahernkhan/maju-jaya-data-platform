@@ -1,0 +1,23 @@
+version: 2
+
+models:
+  - name: mart_sales_summary
+    description: >
+      Pre-aggregated sales report by period, class, and model.
+      Grain: 1 per (periode, class, model).
+      Directly consumed by dashboard.
+    columns:
+      - name: total
+        description: "Total nominal penjualan (Rupiah)"
+        tests:
+          - not_null
+
+  - name: mart_aftersales_priority
+    description: >
+      After-sales priority report. Excludes orphan VIN and future dates.
+      Grain: 1 per (periode, vin).
+    columns:
+      - name: priority
+        tests:
+          - accepted_values:
+              values: ['HIGH', 'MED', 'LOW']

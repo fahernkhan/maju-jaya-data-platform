@@ -1,0 +1,20 @@
+version: 2
+
+sources:
+  - name: raw_maju
+    database: olist-platform
+    schema: raw_maju
+    tables:
+      - name: customers
+        columns:
+          - name: id
+            tests: [unique, not_null]
+      - name: sales
+        columns:
+          - name: vin
+            tests: [unique, not_null]
+      - name: after_sales
+        columns:
+          - name: service_ticket
+            tests: [unique, not_null]
+      - name: customer_addresses

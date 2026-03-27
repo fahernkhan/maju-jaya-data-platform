@@ -1,0 +1,49 @@
+version: 2
+
+models:
+  - name: dim_customer
+    description: "Customer dimension with latest address. Grain: 1 per customer."
+    columns:
+      - name: customer_id
+        tests: [unique, not_null]
+
+  - name: dim_vehicle
+    description: "Vehicle model dimension with price ranges. Grain: 1 per model."
+    columns:
+      - name: model
+        tests: [unique, not_null]
+
+  - name: dim_date
+    description: "Date dimension spine 2024-2027. Grain: 1 per date."
+    columns:
+      - name: date_id
+        tests: [unique, not_null]
+
+  - name: dim_service_type
+    description: "Service type reference. Grain: 1 per code."
+    columns:
+      - name: service_type_code
+        tests: [unique, not_null]
+
+  - name: fact_sales
+    description: >
+      Sales fact table. Grain: 1 per VIN (deduplicated).
+      Only canonical records included.
+    columns:
+      - name: vin
+        tests: [unique, not_null]
+      - name: customer_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_id
+      - name: price
+        tests:
+          - not_null
+
+  - name: fact_after_sales
+    description: "After-sales fact table. Grain: 1 per service ticket."
+    columns:
+      - name: service_ticket
+        tests: [unique, not_null]

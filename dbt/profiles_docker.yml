@@ -1,0 +1,12 @@
+maju_jaya:
+  target: dev
+  outputs:
+    dev:
+      type: mysql
+      server: mysql              # <-- Docker service name
+      port: 3306
+      schema: maju_jaya
+      username: maju_jaya
+      password: maju_jaya_pass
+      charset: utf8mb4
+      threads: 4

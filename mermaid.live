@@ -1,0 +1,50 @@
+erDiagram
+    dim_customer {
+        int customer_id PK
+        varchar customer_name
+        date date_of_birth
+        boolean is_dob_suspect
+        varchar customer_type
+        varchar city
+        varchar province
+    }
+    dim_vehicle {
+        varchar model PK
+        bigint min_price
+        bigint max_price
+        varchar default_price_class
+    }
+    dim_date {
+        date date_id PK
+        int year
+        int month
+        int quarter
+        varchar month_name
+    }
+    dim_service_type {
+        varchar service_type_code PK
+        varchar service_type_name
+        varchar description
+    }
+    fact_sales {
+        varchar vin PK
+        int customer_id FK
+        varchar model FK
+        date date_id FK
+        bigint price
+        varchar price_class
+    }
+    fact_after_sales {
+        varchar service_ticket PK
+        varchar vin
+        int customer_id FK
+        date date_id FK
+        varchar service_type_code FK
+    }
+
+    dim_customer ||--o{ fact_sales : "has"
+    dim_vehicle ||--o{ fact_sales : "sold as"
+    dim_date ||--o{ fact_sales : "on date"
+    dim_customer ||--o{ fact_after_sales : "services"
+    dim_date ||--o{ fact_after_sales : "on date"
+    dim_service_type ||--o{ fact_after_sales : "type"
