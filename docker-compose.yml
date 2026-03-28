@@ -24,34 +24,38 @@
 
 version: '3.8'
 
-# ── SHARED AIRFLOW CONFIG ────────────────────────────────────
-# Semua Airflow services pakai config yang sama (DRY)
-
+# ── SHARED AIRFLOW CONFIG ───────────────────
 x-airflow-common: &airflow-common
   image: maju-airflow:latest
+  env_file:
+    - .env
   environment: &airflow-env
-    # ── Airflow core ──
+    # ── Airflow Core ──
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow_pass@postgres:5432/airflow
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-    AIRFLOW__CORE__FERNET_KEY: "81HqDtbqAywKSOumSha3BhWNOdQ26slT6K0YaZeZyPs="
-    AIRFLOW__WEBSERVER__SECRET_KEY: "maju_jaya_secret_2026"
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
     AIRFLOW__CORE__DEFAULT_TIMEZONE: Asia/Jakarta
     AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: Asia/Jakarta
-    # ── GCP credentials ──
-    GOOGLE_APPLICATION_CREDENTIALS: /opt/credentials/sa-pipeline-dev.json
-    GCP_PROJECT_ID: maju-jaya-platform
-    GCS_BUCKET_RAW: maju-jaya-raw-dev
-    BQ_DATASET_RAW: raw_maju
-    # ── MySQL source connection (hostname = docker service name) ──
-    MYSQL_HOST: mysql-source
-    MYSQL_PORT: "3306"
-    MYSQL_DB: maju_jaya
-    MYSQL_USER: maju_jaya
-    MYSQL_PASSWORD: maju_jaya_pass
-    # ── Paths inside container ──
+
+    # ── GCP ──
+    GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS}
+    GCP_PROJECT_ID: ${GCP_PROJECT_ID}
+    GCS_BUCKET_RAW: ${GCS_BUCKET_RAW}
+    BQ_DATASET_RAW: ${BQ_DATASET_RAW}
+
+    # ── MySQL ──
+    MYSQL_HOST: ${MYSQL_HOST}
+    MYSQL_PORT: ${MYSQL_PORT}
+    MYSQL_DB: ${MYSQL_DB}
+    MYSQL_USER: ${MYSQL_USER}
+    MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+
+    # ── Paths ──
     CSV_DIR: /opt/airflow/data
     EXCEL_DIR: /opt/airflow/data/excel
+
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/logs:/opt/airflow/logs
@@ -62,67 +66,64 @@ x-airflow-common: &airflow-common
     - ./dbt:/opt/airflow/dbt
     - ./data:/opt/airflow/data
     - ./data_quality:/opt/airflow/data_quality
-    - ./credentials:/opt/credentials:ro  # read-only!
+    - ./credentials:/opt/credentials:ro
+
   depends_on:
     postgres:
       condition: service_healthy
+
   restart: unless-stopped
 
-# ── SERVICES ─────────────────────────────────────────────────
-
+# ── SERVICES ────────────────────────────────
 services:
 
-  # ── PostgreSQL (Airflow metadata) ──────────────────────────
-  # Kenapa PostgreSQL, bukan MySQL?
-  #   MySQL sebagai Airflow backend → lock contention pada metadata
-  #   tables + utf8mb4 charset issues. PostgreSQL proven stable.
+  # ── PostgreSQL ────────────────────────────
   postgres:
     image: postgres:15-alpine
     container_name: maju-postgres
+    env_file:
+      - .env
     environment:
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow_pass
-      POSTGRES_DB: airflow
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5433:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
     restart: unless-stopped
 
-  # ── MySQL (OLTP source simulation) ─────────────────────────
-  # Data di-seed otomatis dari scripts/01_init.sql
-  # saat PERTAMA kali container start
+  # ── MySQL Source ──────────────────────────
   mysql-source:
     image: mysql:8.0
     container_name: maju-mysql-source
+    env_file:
+      - .env
     environment:
-      MYSQL_ROOT_PASSWORD: root_pass_123
-      MYSQL_DATABASE: maju_jaya
-      MYSQL_USER: maju_jaya
-      MYSQL_PASSWORD: maju_jaya_pass
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DB}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     ports:
       - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
       - ./scripts/01_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot_pass_123"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
       interval: 10s
       timeout: 5s
       retries: 10
-      start_period: 30s   # MySQL butuh waktu lebih lama untuk init
+      start_period: 30s
     command: --default-authentication-plugin=mysql_native_password
     restart: unless-stopped
 
-  # ── Adminer (MySQL GUI) ────────────────────────────────────
-  # Akses: http://localhost:8080
-  # Server: mysql-source, Username: maju_jaya, Password: maju_jaya_pass
+  # ── Adminer ───────────────────────────────
   adminer:
     image: adminer:4.8.1
     container_name: maju-adminer
@@ -135,45 +136,37 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # ── Airflow Init (one-time setup) ──────────────────────────
-  # Migrate database schema + create admin user
-  # restart: "no" → run sekali lalu exit
+  # ── Airflow Init ──────────────────────────
   airflow-init:
     <<: *airflow-common
     restart: "no"
     entrypoint: /bin/bash
     command:
       - -c
-      - exec /entrypoint airflow version
-    environment:
-      <<: *airflow-env
-      _AIRFLOW_DB_MIGRATE: 'true'
-      
-  # ── Airflow Webserver ──────────────────────────────────────
-  # UI: http://localhost:8081 (login: admin/admin)
-  # CRITICAL: depends on airflow-init with service_completed_successfully
-  #   → webserver TIDAK start sampai init selesai
-  #   → tanpa ini, webserver boot sebelum DB migrate → crash
+      - |
+        airflow db migrate && \
+        airflow users create \
+          --username ${AIRFLOW_ADMIN_USERNAME} \
+          --password ${AIRFLOW_ADMIN_PASSWORD} \
+          --firstname ${AIRFLOW_ADMIN_FIRSTNAME} \
+          --lastname ${AIRFLOW_ADMIN_LASTNAME} \
+          --role Admin \
+          --email ${AIRFLOW_ADMIN_EMAIL}
+
+  # ── Airflow Webserver ─────────────────────
   airflow-web:
     <<: *airflow-common
     container_name: maju-airflow-web
     command: airflow webserver --port 8080
     ports:
-      - "8081:8080"   # host 8081 → container 8080
+      - "8081:8080"
     depends_on:
       airflow-init:
         condition: service_completed_successfully
       mysql-source:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
 
-  # ── Airflow Scheduler ──────────────────────────────────────
-  # Runs DAGs on schedule. Same dependency pattern as webserver.
+  # ── Airflow Scheduler ─────────────────────
   airflow-scheduler:
     <<: *airflow-common
     container_name: maju-airflow-scheduler
@@ -184,10 +177,7 @@ services:
       mysql-source:
         condition: service_healthy
 
-# ── VOLUMES (persistent data) ────────────────────────────────
-
+# ── VOLUMES ────────────────────────────────
 volumes:
   postgres_data:
-    name: maju-postgres-data
   mysql_data:
-    name: maju-mysql-data
