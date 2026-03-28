@@ -1,0 +1,1 @@
+docker build -f Dockerfile.airflow -t maju-airflow:latest .

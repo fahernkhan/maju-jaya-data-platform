@@ -4,7 +4,19 @@ USER root
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc default-libmysqlclient-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
+
+# Create folder venv + Give permission
+RUN mkdir -p /opt/pipeline-venv && chown -R airflow: /opt/pipeline-venv
+
 USER airflow
 
-COPY requirements-docker.txt /tmp/requirements-docker.txt
-RUN pip install --no-cache-dir -r /tmp/requirements-docker.txt
+# ── Airflow env (SQLAlchemy 1.4) ──
+COPY requirements-airflow-docker.txt /tmp/requirements-airflow.txt
+RUN pip install --no-cache-dir \
+    -r /tmp/requirements-airflow.txt \
+    --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.9.3/constraints-3.11.txt"
+
+# ── Pipeline env (SQLAlchemy 2.0) ──
+RUN python -m venv /opt/pipeline-venv
+COPY requirements.txt /tmp/requirements-pipeline.txt
+RUN /opt/pipeline-venv/bin/pip install --no-cache-dir -r /tmp/requirements-pipeline.txt

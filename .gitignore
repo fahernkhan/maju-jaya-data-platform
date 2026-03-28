@@ -8,6 +8,7 @@ dbt/logs/
 dbt/dbt_packages/
 *.egg-info/
 .DS_Store
+temp/
 
 #OTHER
 .qodo

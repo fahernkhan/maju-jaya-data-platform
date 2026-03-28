@@ -1,688 +1,692 @@
 # Maju Jaya Data Platform
 
+End-to-end data engineering platform untuk perusahaan retail otomotif **Maju Jaya**. Proyek ini membangun pipeline otomatis yang mengkonsolidasikan data dari MySQL dan Excel (Google Drive) ke BigQuery, menerapkan 4-layer transformation dengan dbt, dan menghasilkan report bisnis secara daily via Airflow.
+
+**Tech Stack:** Python · Terraform · Docker · Apache Airflow · Google Cloud Storage · BigQuery · dbt · Metabase
+
+---
 ![alt text](<Layering Data Maju Jaya Motors.png>)
+## Table of Contents
 
-> End-to-end data engineering platform untuk retail otomotif "Maju Jaya".
-> Migrasi dari Excel-based reporting ke modern data warehouse dengan BigQuery.
-
-**Stack:** Python · Terraform · Docker · Airflow · GCS · BigQuery · dbt · Metabase
-
----
-
-## Daftar Isi
-
-1. [Ringkasan Proyek](#1-ringkasan-proyek)
-2. [Arsitektur Sistem](#2-arsitektur-sistem)
-3. [Tech Stack & Alasan Pemilihan](#3-tech-stack--alasan-pemilihan)
-4. [Data Sources](#4-data-sources)
-5. [Ingestion Layer](#5-ingestion-layer)
-6. [Transformation Layer (dbt)](#6-transformation-layer-dbt)
-7. [Data Warehouse Design](#7-data-warehouse-design)
-8. [Orchestration (Airflow)](#8-orchestration-airflow)
-9. [Data Quality](#9-data-quality)
-10. [Infrastructure as Code](#10-infrastructure-as-code)
-11. [Keputusan Arsitektur & Referensi](#11-keputusan-arsitektur--referensi)
-12. [Cara Menjalankan](#12-cara-menjalankan)
-13. [Interview Reference](#13-interview-reference)
+- [Latar Belakang](#latar-belakang)
+- [Arsitektur](#arsitektur)
+- [Kenapa Arsitektur Ini](#kenapa-arsitektur-ini)
+- [Alur Data Layer-by-Layer](#alur-data-layer-by-layer)
+- [Star Schema Design](#star-schema-design)
+- [Data Quality](#data-quality)
+- [Airflow Pipeline](#airflow-pipeline)
+- [Infrastruktur](#infrastruktur)
+- [Cara Menjalankan](#cara-menjalankan)
+- [Project Structure](#project-structure)
+- [dbt Lineage Graph](#dbt-lineage-graph)
+- [Keputusan Arsitektur](#keputusan-arsitektur)
+- [Apa yang Bisa Dipelajari dari Project Ini](#apa-yang-bisa-dipelajari-dari-project-ini)
+- [Referensi](#referensi)
 
 ---
 
-## 1. Ringkasan Proyek
+## Latar Belakang
 
-Maju Jaya adalah perusahaan retail otomotif yang sedang membangun pusat data. Saat ini data tersebar di MySQL (transaksi penjualan dan servis) dan Excel/file share (alamat customer harian). Tujuan proyek ini adalah membangun data platform yang:
+Maju Jaya adalah perusahaan retail otomotif yang menjual kendaraan (RAIZA, RANGGO, INNAVO, VELOS) dan menyediakan layanan after-sales (Body Paint, Periodic Maintenance, General Repair).
 
-- Mengkonsolidasikan semua data ke satu tempat (BigQuery)
-- Menerapkan data cleaning yang konsisten dan traceable
-- Menghasilkan report penjualan dan after-sales secara otomatis
-- Bisa dijalankan ulang tanpa efek samping (idempotent)
-- Terdokumentasi dengan lineage graph otomatis (dbt docs)
+Saat ini data tersebar di dua tempat:
 
-### Apa yang dibangun
+- **MySQL** — database transaksional yang menyimpan data customer (6 records), penjualan (5 records), dan servis kendaraan (3 records). Data ini "kotor": tanggal lahir dalam 3 format berbeda, harga sebagai string, dan ada record duplicate suspect.
 
-| Komponen | Output |
-|----------|--------|
-| Pipeline ingestion | MySQL → BigQuery, Excel → GCS → BigQuery |
-| Data cleaning | 6 masalah data teridentifikasi dan di-flag |
-| Report 1 | Penjualan per periode, class, model |
-| Report 2 | After-sales priority per customer |
-| DWH design | Star schema: 4 dimensi + 2 fakta |
-| Orchestration | Airflow DAG dengan sensors |
-| Documentation | dbt docs lineage graph |
+- **Excel di Google Drive** — file `customer_addresses_yyyymmdd.xlsx` yang diupdate harian. Berisi alamat customer (4 records) dengan casing yang tidak konsisten (JAKARTA PUSAT vs Jakarta Utara).
+
+Reporting dilakukan manual — rawan error, tidak bisa di-audit, dan tidak scalable. Management butuh 2 report: ringkasan penjualan per periode/kelas/model, dan prioritas customer berdasarkan frekuensi servis.
+
+Platform ini membangun seluruh pipeline dari nol: extract data dari kedua source, load ke BigQuery, transform lewat 4 layer dbt, validate dengan tests, dan orchestrate daily dengan Airflow. Hasilnya: 2 report yang bisa diakses langsung dari BI tool, berjalan otomatis setiap hari, dan setiap transformasi bisa di-trace lewat dbt lineage graph.
 
 ---
 
-## 2. Arsitektur Sistem
+## Arsitektur
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                      Maju Jaya Data Platform                        │
-│                                                                     │
-│  Tech: Python · Terraform · Docker · Airflow                       │
-│                                                                     │
-│  ┌──────────────────────── Data Sources ────────────────────────┐   │
-│  │                                                               │   │
-│  │  ┌─────────────┐                    ┌─────────────┐          │   │
-│  │  │ Excel File  │                    │ MySQL OLTP  │          │   │
-│  │  │ Google Drive │                    │ 3 tables    │          │   │
-│  │  └──────┬──────┘                    └──────┬──────┘          │   │
-│  │         │                                  │                  │   │
-│  └─────────┼──────────────────────────────────┼──────────────────┘   │
-│            │ Python                           │ Python               │
-│            ▼                                  │                      │
-│  ┌──────────────────┐                         │                      │
-│  │ Google Cloud     │                         │                      │
-│  │ Storage (GCS)    │                         │                      │
-│  │ Parquet staging  │                         │                      │
-│  └────────┬─────────┘                         │                      │
-│           │ free batch load                   │ direct load          │
-│           ▼                                   ▼                      │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │                     BigQuery                                  │   │
-│  │                                                               │   │
-│  │  ┌───────────┐   ┌───────────┐   ┌───────────────────────┐  │   │
-│  │  │ raw_maju  │──▶│ stg_maju  │──▶│      mart_maju        │  │   │
-│  │  │ (tables)  │   │ (views)   │   │ (dim + fact + serving) │  │   │
-│  │  └───────────┘   └───────────┘   └───────────────────────┘  │   │
-│  │                                                               │   │
-│  │                        dbt                                    │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-│            │                                                        │
-│            ▼                                                        │
-│  ┌──────────────────┐                                               │
-│  │    Metabase       │                                               │
-│  │    Dashboard      │                                               │
-│  └──────────────────┘                                               │
-└─────────────────────────────────────────────────────────────────────┘
+MySQL (OLTP)                          Excel (Google Drive)
+3 tables                              daily .xlsx files
+     │                                      │
+     │ Python                               │ Python
+     │ pandas + sqlalchemy                  │ openpyxl + google-api
+     │                                      │
+     │ ┌─────────────────┐                  │ ┌──────────────────────┐
+     │ │ Direct to BQ    │                  │ │ GCS bucket staging   │
+     │ │ (Option C)      │                  │ │ (Parquet format)     │
+     │ │ No GCS needed   │                  │ │ Free BQ batch load   │
+     │ └────────┬────────┘                  │ └──────────┬───────────┘
+     │          │                           │            │
+     ▼          ▼                           ▼            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                        BigQuery                                  │
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │ raw_maju (native tables)                                 │    │
+│  │ customers │ sales │ after_sales │ customer_addresses     │    │
+│  └──────────────────────────┬──────────────────────────────┘    │
+│                              │                                   │
+│  ════════════ BOUNDARY ══════╪═══════════════════════════════    │
+│  Di atas : Python + Airflow  │  (Extract + Load)                │
+│  Di bawah: dbt               │  (Transform)                     │
+│                              ▼                                   │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │ stg_maju (VIEWS — $0 storage, selalu fresh)             │    │
+│  │ stg_customers │ stg_sales │ stg_after_sales │ stg_addr  │    │
+│  └──────────────────────────┬──────────────────────────────┘    │
+│                              │                                   │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │ intermediate (EPHEMERAL — CTE, tidak persist)            │    │
+│  │ int_customer_enriched │ int_sales_enriched               │    │
+│  └──────────────────────────┬──────────────────────────────┘    │
+│                              │                                   │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │ mart_maju (TABLES — star schema, partitioned+clustered) │    │
+│  │ dim_customer │ dim_vehicle │ dim_date │ dim_service_type │    │
+│  │ fact_sales (partitioned) │ fact_after_sales              │    │
+│  │ mart_sales_summary │ mart_aftersales_priority            │    │
+│  └─────────────────────────────────────────────────────────┘    │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+         │
+         ▼
+    Dashboard / BI tool (Metabase)
 ```
-
-### Alur data dalam satu kalimat
-
-MySQL dan Excel adalah sumber data mentah. Python scripts (dijalankan Airflow) meng-extract data dan menaruhnya di BigQuery sebagai raw tables. dbt kemudian mentransformasi raw → staging (clean) → intermediate (join + logic) → mart (star schema + reports). Metabase membaca langsung dari mart untuk dashboard.
 
 ---
 
-## 3. Tech Stack & Alasan Pemilihan
+## Kenapa Arsitektur Ini
 
-### 3.1 Python (ingestion scripts)
+Tiga keputusan yang membedakan platform ini dari "default" tutorial:
 
-Python dipakai untuk extract data dari MySQL dan Excel, lalu load ke BigQuery. Bukan dbt — karena dbt hanya transform, bukan extract/load.
+### 1. MySQL langsung ke BigQuery, tanpa lewat GCS
 
-Libraries utama:
-- `pandas` + `sqlalchemy` — extract dari MySQL
-- `openpyxl` — baca Excel (.xlsx)
-- `google-cloud-bigquery` — load langsung ke BigQuery
-- `google-cloud-storage` — upload Parquet ke GCS
+Kebanyakan tutorial mengajarkan: source → GCS (data lake) → BigQuery. Tapi untuk database source yang sudah structured, GCS tidak menambah value:
 
-### 3.2 Google Cloud Storage (GCS)
+- BigQuery storage = **$0.020/GB/month**
+- GCS Standard = **$0.020/GB/month**
+- Harga **sama**. GCS hanya menambah satu hop yang bisa gagal.
 
-GCS dipakai HANYA untuk file-based sources (Excel/CSV). MySQL TIDAK lewat GCS.
+Google Cloud sendiri menyediakan Datastream for BigQuery yang langsung MySQL → BigQuery. Rittman Analytics, Eagle AI, dan pattern dari Juan Ramos (Towards Analytics Engineering) semuanya load database sources langsung ke BigQuery.
 
-Kenapa? Karena BigQuery batch load dari GCS itu gratis — zero ingestion cost. File asli juga tersimpan di GCS sebagai backup kalau perlu replay.
+Script: `scripts/extract_mysql_to_bigquery.py` — menggunakan `bq.load_table_from_dataframe()`, WRITE_TRUNCATE (idempotent).
 
-> **Referensi:** Google Cloud documentation: "For batch use cases, Cloud Storage is the recommended place to land incoming data." Batch loads from GCS to BigQuery are free of charge.
->
-> — [BigQuery Data Ingestion Guide](https://cloud.google.com/blog/topics/developers-practitioners/bigquery-explained-data-ingestion)
+### 2. Excel lewat GCS dulu, baru ke BigQuery
 
-### 3.3 BigQuery (data warehouse)
+Berbeda dengan MySQL, file-based sources memang sebaiknya lewat GCS karena:
 
-BigQuery adalah single source of truth untuk semua data — raw, staging, dan mart. Semua transformasi terjadi di sini via dbt.
+- BigQuery batch load dari GCS = **GRATIS** ($0 ingestion cost). Ini official Google pricing.
+- File Parquet asli tetap tersimpan di GCS sebagai **backup** kalau perlu replay.
+- Parquet = columnar compression. Excel 10MB → Parquet ~2MB.
+- Hive-style partitioning: `gs://bucket/raw/excel/addresses/ingestion_date=2026-03-28/addresses.parquet`
 
-Kenapa BigQuery, bukan MySQL sebagai warehouse?
-- Serverless — tidak perlu manage server
-- Columnar storage — query analytics jauh lebih cepat
-- Native partitioning dan clustering — optimasi cost otomatis
-- dbt-bigquery adapter mature dan well-documented
+Flow: Google Drive → `download_from_gdrive.py` → local → `extract_excel_to_gcs.py` → GCS → `load_gcs_to_bigquery.py` → BigQuery.
 
-> **Referensi:** Google Cloud Lakehouse whitepaper: "Without a cost premium on BigQuery storage vs blob storage, there is no longer a required cost-based justification for separate storage."
->
-> — [Building a Data Lakehouse](https://services.google.com/fh/files/misc/building-a-data-lakehouse.pdf)
+### 3. BigQuery sebagai single source of truth, bukan GCS
 
-### 3.4 dbt (transformation)
+Google Cloud Lakehouse whitepaper (2024) menyatakan: "Without a cost premium on BigQuery storage vs blob storage, there is no longer a required cost-based justification for separate storage."
 
-dbt menangani semua transformasi di dalam BigQuery. dbt TIDAK melakukan extract atau load — hanya transform (T dalam ELT).
+GCS hanya diperlukan untuk:
+- Data unstructured (gambar, video, PDF)
+- Volume >10TB rarely-queried (Coldline 5x lebih murah)
+- Multi-engine processing (Spark, Vertex AI)
+- Regulatory compliance (immutable file locks)
 
-Kenapa dbt?
-- SQL-first — semua engineer bisa baca dan review
-- Lineage graph otomatis — `dbt docs serve` visualisasi dependency
-- Built-in testing — unique, not_null, accepted_values, custom SQL
-- Version control — semua model di git, bisa code review
-
-> **Referensi:** dbt Labs best practice guide: "Your dbt project will depend on raw data stored in your database. Since this data is normally loaded by third parties, the structure of it can change over time — dbt should not be responsible for loading raw data."
->
-> — [dbt Best Practices](https://docs.getdbt.com/best-practices/best-practice-workflows)
-
-### 3.5 Apache Airflow (orchestration)
-
-Airflow mengatur urutan eksekusi: extract → sensor verify → load → dbt run → dbt test. Dijalankan via Docker dengan PostgreSQL sebagai metadata database.
-
-Kenapa Airflow, bukan cron?
-- DAG dependency — task B jalan hanya setelah task A sukses
-- Retry with backoff — kalau gagal, coba lagi otomatis
-- Sensors — verifikasi data ada sebelum lanjut
-- UI monitoring — lihat status pipeline di browser
-
-Kenapa PostgreSQL backend, bukan MySQL?
-- MySQL sebagai Airflow metadata sering error karena lock contention
-- PostgreSQL proven stable untuk Airflow (ini pattern dari Olist project)
-
-> **Referensi:** Astronomer reference architecture: "ELT with BigQuery, dbt, and Apache Airflow for eCommerce" uses PostgreSQL backend and GCS-to-BigQuery batch loads.
->
-> — [Astronomer ELT Reference](https://www.astronomer.io/docs/learn/reference-architecture-elt-bigquery-dbt)
-
-### 3.6 Terraform (infrastructure)
-
-Terraform membuat semua GCP resources secara reproducible: GCS bucket, BigQuery datasets, service account, IAM bindings. Satu `terraform apply` dan semuanya siap.
-
-### 3.7 Docker (containerization)
-
-Docker Compose menjalankan MySQL source, PostgreSQL (Airflow metadata), Adminer (database GUI), Airflow webserver, dan Airflow scheduler. Semua dalam satu `docker compose up -d`.
-
-Custom Dockerfile untuk Airflow: semua pip packages di-install saat build, bukan saat runtime. Ini mencegah error startup yang sering terjadi kalau install packages saat container boot.
-
-### 3.8 Metabase (visualization)
-
-Metabase membaca langsung dari `mart_maju` dataset di BigQuery. Tidak perlu ETL tambahan — mart tables sudah pre-aggregated dan siap query.
+Untuk project ini (structured data, <1GB), BigQuery sudah cukup sebagai warehouse sekaligus "lake."
 
 ---
 
-## 4. Data Sources
+## Alur Data Layer-by-Layer
 
-### 4.1 MySQL OLTP (3 tables)
+Setiap layer punya **satu tanggung jawab**. Kalau kamu campur (misal join + aggregate di staging), debugging jadi nightmare karena kamu tidak tahu masalah di langkah mana. Bayangkan seperti dapur restoran: cuci bahan, masak, plating — setiap station punya tugas sendiri.
 
-Database transaksional yang sudah ada di perusahaan.
+### Layer 0: Raw — data mentah dari source
 
-**customers_raw** (6 rows):
+Diisi oleh Python/Airflow di Fase 2. dbt **tidak menyentuh** layer ini. dbt hanya mendeklarasikan raw tables sebagai `source()` di YAML, lalu membaca.
 
-| id | name | dob | created_at |
-|----|------|-----|------------|
-| 1 | Antonio | 1998-08-04 | 2025-03-01 14:24:40 |
-| 2 | Brandon | 2001-04-21 | 2025-03-02 08:12:54 |
-| 3 | Charlie | 1980/11/15 | 2025-03-02 11:20:02 |
-| 4 | Dominikus | 14/01/1995 | 2025-03-03 09:50:41 |
-| 5 | Erik | 1900-01-01 | 2025-03-03 17:22:03 |
-| 6 | PT Black Bird | NULL | 2025-03-04 12:52:16 |
+Kenapa dbt tidak buat raw tables? Karena dbt = **T** (Transform) dalam ELT. dbt Labs sendiri bilang: "dbt does not extract or load data." Boundary yang jelas: kalau ingestion gagal → debug Python. Kalau transform gagal → debug dbt. Tidak campur.
 
-Masalah data: DOB punya 3 format berbeda, placeholder 1900-01-01, NULL untuk corporate.
+```
+raw_maju.customers          6 rows   DOB 3 format, NULL, placeholder 1900-01-01
+raw_maju.sales              5 rows   price as string "350.000.000", duplicate suspect
+raw_maju.after_sales        3 rows   orphan VIN (POI1059IIK), future date (2026-09-10)
+raw_maju.customer_addresses 4 rows   city casing inconsistent (JAKARTA PUSAT vs Jakarta Utara)
+```
 
-**sales_raw** (5 rows):
+### Layer 1: Staging — cuci bahan mentah (dbt VIEWS)
 
-| vin | customer_id | model | invoice_date | price |
-|-----|-------------|-------|--------------|-------|
-| JIS8135SAD | 1 | RAIZA | 2025-03-01 | 350.000.000 |
-| MAS8160POE | 3 | RANGGO | 2025-05-19 | 430.000.000 |
-| JLK1368KDE | 4 | INNAVO | 2025-05-22 | 600.000.000 |
-| JLK1869KDF | 6 | VELOS | 2025-08-02 | 390.000.000 |
-| JLK1962KOP | 6 | VELOS | 2025-08-02 | 390.000.000 |
+**Aturan keras:**
+- 1 source = 1 staging model. Tidak boleh 2 source di 1 model.
+- HANYA rename, cast, filter null, flag masalah.
+- TIDAK ADA join, aggregate, atau business logic.
+- Materialized = **VIEW** → $0 storage, selalu fresh.
 
-Masalah data: price sebagai string dengan titik ribuan, 2 record terakhir suspect duplicate (same customer + model + date).
+Kenapa VIEW? dbt Labs merekomendasikan: "establishing a staging layer mainly composed of views, not tables." Views tidak menyimpan data, hanya query definition. Kalau raw berubah, staging otomatis reflect tanpa re-run.
 
-**after_sales_raw** (3 rows):
+| Model | Apa yang dilakukan | Contoh |
+|-------|-------------------|--------|
+| `stg_customers` | DOB 3 format → 1 DATE. Flag `is_dob_suspect`, classify `customer_type` | `'14/01/1995'` → `DATE 1995-01-14` |
+| `stg_sales` | Price string → INT64. Detect duplicate suspects via window function | `'350.000.000'` → `350000000` |
+| `stg_after_sales` | Flag orphan VIN dan future dates | `POI1059IIK` → `is_vin_not_in_sales = TRUE` |
+| `stg_customer_addresses` | Latest address per customer (ROW_NUMBER dedup). INITCAP casing | `JAKARTA PUSAT` → `Jakarta Pusat` |
 
-| service_ticket | vin | customer_id | model | service_date | service_type |
-|----------------|-----|-------------|-------|--------------|--------------|
-| T124-kgu1 | MAS8160POE | 3 | RANGGO | 2025-07-11 | BP |
-| T560-jga1 | JLK1368KDE | 4 | INNAVO | 2025-08-04 | PM |
-| T521-oai8 | POI1059IIK | 5 | RAIZA | 2026-09-10 | GR |
+**Prinsip penting: flag, bukan delete.** Data asli tidak dibuang. is_dob_suspect, is_duplicate_suspect, is_vin_not_in_sales — semua boolean flag. Analyst bisa decide sendiri mau filter atau include. Dashboard bisa tunjukkan "X% data punya masalah." Serving layer yang filter; raw dan staging preserve semuanya.
 
-Masalah data: VIN POI1059IIK tidak ada di sales_raw (orphan), tanggal 2026-09-10 adalah masa depan.
+### Layer 2: Intermediate — masak setengah jadi (dbt EPHEMERAL)
 
-### 4.2 Excel file share (daily)
+Tempat **join** dan **business logic**. Materialized sebagai ephemeral = CTE (Common Table Expression) yang dikompilasi di dalam query mart. Tidak persist ke BigQuery. $0 storage.
 
-File `customer_addresses_yyyymmdd.xlsx` keluar harian di folder. Berisi alamat terbaru customer.
+Kenapa intermediate ada? Tanpa intermediate:
+- `dim_customer` butuh JOIN customer + address → tulis JOIN
+- `mart_aftersales_priority` juga butuh customer name + address → akses lewat dim_customer
+- `fact_sales` butuh price_class + dedup → tulis CASE WHEN + ROW_NUMBER
+- `dim_vehicle` juga butuh price_class dari sales → tulis lagi
 
-| id | customer_id | address | city | province |
-|----|-------------|---------|------|----------|
-| 1 | 1 | Jalan Mawar V, RT 1/RW 2 | Bekasi | Jawa Barat |
-| 2 | 3 | Jl Ababil Indah | Tangerang Selatan | Jawa Barat |
-| 3 | 4 | Jl. Kemang Raya 1 No 3 | JAKARTA PUSAT | DKI JAKARTA |
-| 4 | 6 | Astra Tower Jalan Yos Sudarso 12 | Jakarta Utara | DKI Jakarta |
+Dengan intermediate, logic ditulis **sekali**. Semua mart tinggal `ref()`. Kalau logic berubah (misalnya range harga LOW dari 100-250jt jadi 100-200jt), update 1 file → semua downstream konsisten.
 
-Masalah data: city/province tidak konsisten (uppercase vs title case).
+| Model | Input | Output | Consumers |
+|-------|-------|--------|-----------|
+| `int_customer_enriched` | stg_customers + stg_addresses | Customer + latest address + full_address | dim_customer (1 consumer, tapi forward-looking: mart baru tinggal `ref()` ke sini) |
+| `int_sales_enriched` | stg_sales + stg_customers | Sales + customer info + price_class (LOW/MEDIUM/HIGH) + dedup (is_canonical) + periode (YYYY-MM) | fact_sales, dim_vehicle (2 consumers) |
+
+**Detail business logic di `int_sales_enriched`:**
+
+Price classification (dari requirement soal):
+```
+100jt - 250jt  → LOW
+250jt - 400jt  → MEDIUM
+> 400jt        → HIGH
+```
+
+Deduplication strategy:
+- Staging: **FLAG** duplicates (`is_duplicate_suspect = TRUE`)
+- Intermediate: **DECIDE** — ROW_NUMBER by `(customer_id, model, invoice_date)`, ORDER BY `created_at ASC`
+- `is_canonical = TRUE` → record yang "menang" (pertama masuk)
+- `is_canonical = FALSE` → record yang "kalah" (tetap ada untuk audit)
+- Fact table nanti filter `WHERE is_canonical = TRUE`
+
+Kenapa ROW_NUMBER bukan DISTINCT? Row 4 dan 5 di sales_raw **tidak identik** — VIN berbeda (JLK1869KDF vs JLK1962KOP). DISTINCT tidak bisa handle ini. ROW_NUMBER pilih 1 winner berdasarkan logika explicit.
+
+### Layer 3: Marts — makanan siap saji (dbt TABLES)
+
+Layer yang langsung dikonsumsi BI tool dan analyst. Materialized sebagai **TABLE** karena:
+- BI tools query mart ratusan kali/hari. TABLE = pre-computed, instant.
+- BigQuery TABLE bisa di-**partition** by date (scan hanya bulan yang diquery).
+- BigQuery TABLE bisa di-**cluster** by column (skip data blocks yang tidak relevan).
+
+Marts dibagi dua subfolder: **core** (star schema) dan **serving** (pre-aggregated reports).
 
 ---
 
-## 5. Ingestion Layer
+## Star Schema Design
 
-### 5.1 Prinsip desain
-
-Tiga prinsip yang diikuti di ingestion layer:
-
-1. **Idempotent** — pipeline bisa dijalankan ulang tanpa duplikasi data. BigQuery `WRITE_TRUNCATE` menghapus dan mengganti partisi, bukan menambah.
-
-2. **Audit trail** — setiap run dicatat di `pipeline_audit_log` MySQL table. Kalau file sudah pernah sukses di-load, pipeline skip.
-
-3. **Minimal transformation** — di ingestion, hanya tambah metadata (`_ingestion_date`, `_source`). Semua business logic ada di dbt, bukan di ingestion scripts.
-
-### 5.2 MySQL → BigQuery (direct load)
+Star schema dipilih karena BI tools (Metabase, Looker, Tableau) optimal dengan pattern ini: query hanya butuh 1 JOIN (fact → dim), bukan 5+ JOIN normalisasi. Analyst bisa drag-and-drop tanpa pahami relasi kompleks.
 
 ```
-MySQL  ──[pandas.read_sql_table]──▶  DataFrame  ──[bq.load_table_from_dataframe]──▶  BigQuery raw_maju
+                          ┌─────────────────┐
+                          │  dim_customer    │
+                          │  PK: customer_id │
+                          │  name, type,     │
+                          │  city, address   │
+                          └────────┬────────┘
+                                   │
+┌─────────────────┐  ┌─────────────┴────────────┐  ┌────────────────────┐
+│  dim_vehicle    │  │     fact_sales            │  │ fact_after_sales   │
+│  PK: model      │──│     PK: vin              │  │ PK: service_ticket │
+│  min/max/avg    │  │     FK: customer_id       │  │ FK: customer_id    │
+│  price_class    │  │     FK: model, date       │  │ FK: date, type     │
+└─────────────────┘  │     price, price_class    │  │ is_vin_not_in_sales│
+                     │     periode               │  │ is_future_date     │
+┌─────────────────┐  └──────────────────────────┘  └─────────┬──────────┘
+│  dim_date       │                                           │
+│  PK: date_id    │──── generated 2024-2027 ─────────────────│
+│  year, month,   │                                           │
+│  quarter, name  │                              ┌────────────┴──────────┐
+│  is_weekend     │                              │ dim_service_type      │
+└─────────────────┘                              │ PK: service_type_code │
+                                                 │ BP, PM, GR            │
+                                                 └───────────────────────┘
 ```
 
-MySQL di-load LANGSUNG ke BigQuery tanpa lewat GCS. Script: `scripts/extract_mysql_to_bigquery.py`.
+### Dimensions (4)
 
-**Kenapa direct, bukan lewat GCS?**
+| Dimension | Grain | Penjelasan |
+|-----------|-------|------------|
+| `dim_customer` | 1 per customer | Dari `int_customer_enriched`. Termasuk latest address (dari Excel daily). |
+| `dim_vehicle` | 1 per model | **Derived** dari sales data (bukan master table — soal tidak kasih). Min/max/avg price. |
+| `dim_date` | 1 per tanggal | **Generated** pakai `GENERATE_DATE_ARRAY`. Kenapa generate, bukan derive dari data? Karena hari tanpa penjualan harus tetap ada di dimension. |
+| `dim_service_type` | 1 per kode | **Static seed** (BP/PM/GR). Soal tidak kasih master table, jadi di-hardcode. Di production bisa jadi dbt seed CSV. |
 
-BigQuery storage costs $0.020/GB/month. GCS Standard costs $0.020-0.023/GB/month. Harga sama. Untuk database source yang sudah structured (SQL rows), GCS tidak menambah value — hanya menambah satu hop yang bisa gagal.
+### Facts (2)
 
-> **Referensi:** Eagle AI case study: "BigQuery became our main data layer — not just a warehouse but the backbone where all our raw and processed data lives." They migrated away from GCS-first to BigQuery-direct.
->
-> — [Spark vs BigQuery, Eagle AI](https://eagleeye.com/blog/spark-vs-bigquery-eagle-ai)
+| Fact | Grain | BigQuery optimization |
+|------|-------|-----------------------|
+| `fact_sales` | 1 per VIN (deduplicated via `is_canonical`) | **Partitioned** by `invoice_date` (monthly) — query bulan tertentu scan 1/12 data. **Clustered** by `customer_id + price_class` — ~30-50% cost reduction tambahan. |
+| `fact_after_sales` | 1 per service ticket | DQ flags preserved (`is_vin_not_in_sales`, `is_future_date`) — fact = complete data untuk audit. |
 
-> **Referensi:** Juan Ramos (Towards Analytics Engineering): pattern menggunakan Fivetran/Stitch loading directly into `company-raw` BigQuery project, bukan lewat GCS.
->
-> — [How to configure dbt projects in BigQuery](https://towardsanalyticsengineering.substack.com/p/how-to-configure-dbt-projects-in)
+### Serving reports (2)
 
-### 5.3 Excel → GCS → BigQuery (batch load)
+| Report | Grain | Menjawab pertanyaan bisnis |
+|--------|-------|---------------------------|
+| `mart_sales_summary` | 1 per (periode, class, model) | "Berapa total penjualan RAIZA class HIGH di bulan Mei 2025?" |
+| `mart_aftersales_priority` | 1 per (year, vin) | "Customer mana yang sering servis dan perlu perhatian khusus?" |
 
-```
-Excel  ──[openpyxl]──▶  DataFrame  ──[to_parquet]──▶  GCS bucket  ──[bq.load_table_from_uri]──▶  BigQuery raw_maju
-```
+Kenapa serving terpisah dari fact? Fact = grain per transaksi. Report = grain per aggregation. Kalau BI tool harus GROUP BY setiap query → lambat dan bisa inconsistent antar dashboard. Serving = pre-aggregated TABLE. BI tool cuma `SELECT *`.
 
-File Excel di-convert ke Parquet, upload ke GCS, lalu batch load ke BigQuery. Scripts: `scripts/extract_excel_to_gcs.py` + `scripts/load_gcs_to_bigquery.py`.
-
-**Kenapa lewat GCS untuk Excel?**
-
-Batch load dari GCS ke BigQuery itu GRATIS — zero ingestion cost. Plus file Parquet asli tetap tersimpan di GCS sebagai backup. Kalau ada masalah, bisa replay tanpa minta ulang file dari source.
-
-> **Referensi:** Google Cloud BigQuery pricing: "Loading data from Cloud Storage is free for batch loads." Streaming inserts have costs, but batch loads from GCS do not.
->
-> — [BigQuery Pricing](https://cloud.google.com/bigquery/pricing)
-
-### 5.4 Boundary: ingestion vs transformation
-
-Ini boundary paling penting di seluruh arsitektur:
-
-| | Ingestion | Transformation |
-|---|---|---|
-| Tool | Python + Airflow | dbt |
-| Baca dari | MySQL, Excel | BigQuery `raw_maju` |
-| Tulis ke | BigQuery `raw_maju` | BigQuery `stg_maju`, `mart_maju` |
-| Scope | Extract + Load | Transform |
-| Boleh join? | Tidak | Ya (di intermediate layer) |
-| Boleh business logic? | Tidak | Ya (di intermediate/mart layer) |
-
-dbt TIDAK PERNAH membuat raw tables. dbt hanya mendeklarasikan raw tables sebagai `sources` di YAML, lalu membaca via `{{ source() }}`.
-
-> **Referensi:** dbt Labs: "dbt does not extract or load data. It focuses on the transformation step of ELT."
->
-> — [What is dbt?](https://docs.getdbt.com/docs/introduction)
+`mart_aftersales_priority` meng-**exclude** orphan VIN dan future dates (`WHERE is_vin_not_in_sales = FALSE AND is_future_date = FALSE`). Fact table preserve semuanya; serving layer yang filter. Separation of concerns: fact preserve, serving present.
 
 ---
 
-## 6. Transformation Layer (dbt)
+## Data Quality
 
-### 6.1 Layer architecture
+### 6 masalah data yang ditangani
 
-dbt models diorganisir dalam 4 layer, mengikuti Medallion Architecture yang diadaptasi:
+| # | Masalah | Tabel | Di mana ditangani | Cara |
+|---|---------|-------|-------------------|------|
+| 1 | DOB dalam 3 format berbeda | customers | stg_customers | `CASE WHEN REGEXP_CONTAINS` + `SAFE.PARSE_DATE` per format |
+| 2 | DOB placeholder 1900-01-01 | customers | stg_customers | Flag `is_dob_suspect = TRUE` |
+| 3 | Corporate entity tanpa DOB | customers | stg_customers | Classify `customer_type = 'corporate'` (heuristic: prefix PT/CV/UD atau DOB NULL) |
+| 4 | Price sebagai string "350.000.000" | sales | stg_sales | `REPLACE('.','')` hapus titik → `SAFE_CAST AS INT64` |
+| 5 | Suspect duplicate (same customer+model+date, beda VIN) | sales | stg_sales (flag) → int_sales_enriched (dedup) | `COUNT(*) OVER()` untuk flag, `ROW_NUMBER()` untuk pick winner |
+| 6 | Orphan VIN + future service date | after_sales | stg_after_sales (flag) → mart_aftersales_priority (exclude) | `LEFT JOIN sales` untuk orphan check, `> CURRENT_DATE()` untuk future |
 
-```
-Medallion    │ dbt layer     │ BigQuery dataset │ Materialization │ Fungsi
-─────────────┼───────────────┼──────────────────┼─────────────────┼─────────────────
-Bronze       │ (not dbt)     │ raw_maju         │ native tables   │ Data mentah, untouched
-Silver       │ staging       │ stg_maju         │ VIEW            │ Clean, cast, rename, flag
-Silver       │ intermediate  │ (ephemeral/CTE)  │ EPHEMERAL       │ Join, business logic
-Gold         │ marts         │ mart_maju        │ TABLE           │ Star schema + reports
-```
+### dbt tests (26 total)
 
-> **Referensi:** dbt Labs blog: "We continue to encourage dbt users to follow this structure, especially establishing a staging layer mainly composed of views, not tables."
->
-> — [Staging Models Best Practices](https://www.getdbt.com/blog/staging-models-best-practices-and-limiting-view-runs)
+**Built-in tests (24 deklarasi di YAML):**
+- `unique` + `not_null` pada semua primary key (customer_id, vin, service_ticket, date_id, model, service_type_code)
+- `accepted_values` pada customer_type, price_class, service_type_code, priority
+- `relationships` — FK integrity: `fact_sales.customer_id` harus ada di `dim_customer.customer_id`
 
-> **Referensi:** ModelDock: "The Medallion Architecture maps directly to dbt's staging, intermediate, and marts pattern. Bronze = raw sources, Silver = staging + intermediate, Gold = marts."
->
-> — [Medallion Architecture with dbt](https://modeldock.run/blog/medallion-architecture-dbt)
+**Custom SQL tests (2 file):**
+- `assert_revenue_non_negative` — semua `price` di fact_sales harus >= 0
+- `assert_serving_excludes_invalid` — orphan VIN dan future dates tidak boleh muncul di serving layer
 
-### 6.2 Staging layer (views)
-
-Aturan: 1 source table = 1 staging model. Hanya rename, cast, filter null. TIDAK ada join.
-
-| Model | Source | Cleaning yang dilakukan |
-|-------|--------|------------------------|
-| `stg_customers` | raw_maju.customers | DOB: 3 format → 1 DATE. Flag: is_dob_suspect, customer_type |
-| `stg_sales` | raw_maju.sales | Price: string → INT64. Flag: is_duplicate_suspect |
-| `stg_after_sales` | raw_maju.after_sales | Flag: is_vin_not_in_sales, is_future_date |
-| `stg_customer_addresses` | raw_maju.customer_addresses | Latest address per customer via ROW_NUMBER |
-
-**Kenapa VIEW, bukan TABLE?**
-
-Views tidak menyimpan data — hanya query definition. Zero storage cost. Selalu fresh: kalau raw berubah, staging otomatis reflect perubahan. Staging hanya rename/cast — view cukup cepat untuk ini.
-
-> **Referensi:** Astrafy (Google Cloud Partner): "Use views for staging models. They don't incur storage costs and always reflect the latest source data."
->
-> — [Data Modeling Best Practices with BigQuery and dbt](https://medium.astrafy.io/data-modeling-best-practices-with-bigquery-and-dbt-329b37faf229)
-
-### 6.3 Intermediate layer (ephemeral)
-
-Intermediate = tempat join dan business logic. Materialized sebagai ephemeral (CTE — tidak persist ke BigQuery).
-
-| Model | Sources | Logic |
-|-------|---------|-------|
-| `int_customer_enriched` | stg_customers + stg_addresses | Join customer + latest address |
-| `int_sales_enriched` | stg_sales + stg_customers | Price class (LOW/MEDIUM/HIGH), dedup via ROW_NUMBER, periode YYYY-MM |
-
-**Kenapa EPHEMERAL?**
-
-Tidak ada BI tool yang query intermediate — hanya mart models yang referensi mereka. Hemat storage. Logic tetap terpisah di file sendiri, jadi lineage graph tetap menunjukkan dependency chain yang jelas.
-
-Trade-off: kalau query mart lambat karena CTE terlalu complex, upgrade ke TABLE.
-
-> **Referensi:** Alejandro Aboy: "What Medallion calls Bronze is sometimes mistaken for dbt staging. The main difference is that dbt staging already does basic processing, while Bronze is truly raw."
->
-> — [SQL to dbt guide: How Data Layers Flow](https://thepipeandtheline.substack.com/p/sql-to-dbt-guide-how-data-layers)
-
-### 6.4 Mart layer (tables)
-
-Mart berisi star schema (fact + dimension) dan serving models (pre-aggregated reports).
-
-**Dimensions:**
-
-| Model | Grain | Kolom utama |
-|-------|-------|-------------|
-| `dim_customer` | 1 per customer | customer_id, name, type, city, province, full_address |
-| `dim_vehicle` | 1 per model | model, min/max/avg price, default_price_class |
-| `dim_date` | 1 per tanggal | date_id, year, month, quarter, day_name, is_weekend |
-| `dim_service_type` | 1 per code | service_type_code (BP/PM/GR), name, description |
-
-**Facts:**
-
-| Model | Grain | Partitioned | Clustered |
-|-------|-------|-------------|-----------|
-| `fact_sales` | 1 per VIN (deduplicated) | invoice_date (monthly) | customer_id, price_class |
-| `fact_after_sales` | 1 per service_ticket | — | — |
-
-**Serving (reports dari soal):**
-
-| Model | Grain | Sesuai requirement |
-|-------|-------|--------------------|
-| `mart_sales_summary` | 1 per (periode, class, model) | Report 1: periode, class, model, total |
-| `mart_aftersales_priority` | 1 per (year, vin) | Report 2: periode, vin, customer, address, count, priority |
-
-**Kenapa TABLE?**
-
-BI tools query mart ratusan kali per hari. TABLE = pre-computed, instant response. Bisa di-partition by date (scan hanya partisi yang dibutuhkan) dan cluster by column (reduce bytes scanned).
-
-> **Referensi:** Laxminarayana Likki: "Mart layer should always be materialized as tables. These are the models that business users and BI tools directly consume."
->
-> — [Staging, Intermediate & Mart Layers in dbt](https://medium.com/@likkilaxminarayana/21-staging-intermediate-mart-layers-in-dbt-a-complete-guide-0d4fcb2ccfc6)
+Convention dbt: custom test query harus return **0 rows** untuk pass. Kalau return rows = test GAGAL.
 
 ---
 
-## 7. Data Warehouse Design
+## Airflow Pipeline
 
-### 7.1 Star schema
+### DAG: `maju_jaya_pipeline`
 
-```
-                    ┌────────────────┐
-                    │  dim_customer  │
-                    │  PK: customer_id│
-                    └───────┬────────┘
-                            │
-  ┌──────────────┐  ┌───────┴────────┐  ┌──────────────────┐
-  │ dim_vehicle  │  │  fact_sales    │  │ fact_after_sales │
-  │ PK: model    │──│  PK: vin      │  │ PK: ticket       │
-  └──────────────┘  │  FK: customer  │  │ FK: customer     │
-                    │  FK: model     │  │ FK: date         │
-  ┌──────────────┐  │  FK: date      │  │ FK: service_type │
-  │  dim_date    │──│  price         │  └──────────────────┘
-  │  PK: date_id │  │  price_class   │          │
-  └──────────────┘  └────────────────┘  ┌───────┴──────────┐
-                                        │ dim_service_type │
-                                        │ PK: code         │
-                                        └──────────────────┘
-```
-
-### 7.2 Data lineage (dbt docs)
+Daily jam 06:00 WIB. 15 tasks. 4 sensor gates. 3 phases.
 
 ```
-raw_maju.customers ──▶ stg_customers ──┐
-                                        ├──▶ int_customer_enriched ──▶ dim_customer ──┐
-raw_maju.customer_addresses ──▶ stg_addresses ──┘                                     │
-                                                                                       ├──▶ mart_aftersales_priority
-raw_maju.sales ──▶ stg_sales ──┐                                                      │
-                                ├──▶ int_sales_enriched ──▶ fact_sales ──▶ mart_sales_summary
-raw_maju.customers ──▶ stg_customers ──┘                        │
-                                                                ▼
-                                                           dim_vehicle
+Phase 1 — INGESTION (parallel)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+start ─┬─► extract_mysql_to_bq ───────────────────────────────┐
+       │                                                       │
+       └─► download_excel_from_gdrive                          │
+              └─► extract_excel_to_gcs                         │
+                    └─► SENSOR: gcs_parquet_exists              │
+                          └─► load_excel_gcs_to_bq ────────────┤
+                                                                │
+           GATE 1: SENSOR raw_layer_ready (4 tables) ◄─────────┘
 
-raw_maju.after_sales ──▶ stg_after_sales ──▶ fact_after_sales ──▶ mart_aftersales_priority
+Phase 2 — DBT STAGING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+           dbt_deps
+              └─► dbt_run_staging (4 views)
+                    └─► GATE 2: SENSOR staging_layer_ready
+                          └─► dbt_test_staging
+
+Phase 3 — DBT MARTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                          dbt_run_marts (intermediate + marts)
+                             └─► GATE 3: SENSOR mart_layer_ready
+                                   └─► dbt_test_marts
+                                         └─► pipeline_complete ✓
 ```
 
-Lineage ini bisa dilihat secara interaktif via `dbt docs serve --port 8082`.
+### 4 sensor gates — kenapa dan bagaimana
+
+| Gate | Checks | Kenapa ada |
+|------|--------|------------|
+| `sensor_gcs_parquet_exists` | File Parquet sudah di GCS | Batch load butuh file dulu. Tanpa sensor: load job gagal dengan "file not found" |
+| `sensor_raw_layer_ready` | 4 raw BQ tables punya data | dbt butuh data untuk transform. Tanpa sensor: staging views query empty tables → silent wrong results |
+| `sensor_staging_layer_ready` | 4 staging views queryable | Mart models `ref()` ke staging. Tanpa sensor: mart error "view not found" |
+| `sensor_mart_layer_ready` | fact + serving tables exist | dbt test butuh materialized table. Tanpa sensor: test gagal "table not found" |
+
+Semua sensor pakai `PythonSensor` dengan `mode="reschedule"`. Kenapa mode ini? Sensor tanpa reschedule **menahan worker slot** selama sleep. Kalau 4 sensor sleep bersamaan = 4 workers terpakai = worker pool habis = pipeline deadlock. Dengan reschedule, sensor **melepas** worker slot antara checks.
+
+### Design patterns
+
+| Pattern | Implementasi | Benefit |
+|---------|-------------|---------|
+| Exponential backoff | `retry_delay=2min, retry_exponential_backoff=True` | 2min → 4min → 8min. Transient failures (network, API quota) recover otomatis |
+| `max_active_runs=1` | Hanya 1 DAG run paralel | Cegah race condition: 2 runs menulis ke table yang sama |
+| SLA 2h | Alert jika pipeline kelamaan | Monitoring: kalau biasanya 15 menit tapi hari ini 2 jam → something wrong |
+| `on_failure_callback` | Structured error logging | Debug: DAG apa, task apa, tanggal apa, log URL |
+
+### Modular code structure
+
+DAG file bukan satu file giant 200+ baris. Dipisah by concern:
+
+```
+airflow/dags/
+  maju_jaya_pipeline.py        ← DAG wiring only (import + define tasks + set dependencies)
+  test_connection.py            ← environment verification DAG
+  common/
+    config.py                   ← semua konstanta: project ID, datasets, sensor settings
+    sensors.py                  ← 3 reusable sensor functions (BQ table check, GCS file check, multi-table check)
+    tasks_ingestion.py          ← 4 ingestion callables (wraps scripts dari Fase 2)
+    callbacks.py                ← on_failure + on_success hooks
+```
+
+Kenapa dipisah? Kalau sensor logic berubah → edit `sensors.py`, bukan cari di tengah DAG file. Kalau GCP project ID berubah → edit `config.py`, bukan find-replace di 10 tempat. DAG file sendiri bisa dibaca dalam 30 detik — hanya imports, task definitions, dan dependency wiring.
 
 ---
 
-## 8. Orchestration (Airflow)
+## Infrastruktur
 
-### 8.1 DAG design
+### Terraform resources
 
-DAG `maju_jaya_pipeline` berjalan daily jam 06:00 WIB. Design patterns yang diterapkan:
-
-| Pattern | Implementasi | Alasan |
-|---------|-------------|--------|
-| PythonSensor | Verify data di BQ/GCS sebelum lanjut | Cegah dbt run pada data kosong |
-| mode=reschedule | Sensor lepas worker slot saat menunggu | Cegah worker deadlock |
-| Exponential backoff | retry_delay 2min → 4min → 8min | Transient failures recover otomatis |
-| max_active_runs=1 | Hanya 1 DAG run paralel | Cegah race condition |
-| SLA=2h | Alert jika pipeline kelamaan | Monitoring |
-| on_failure_callback | Log error details | Debugging |
-
-### 8.2 Task flow
-
-```
-start
-  ├──▶ extract_mysql_direct_to_bq ──────────────────────┐
-  └──▶ extract_excel_to_gcs ──▶ sensor_gcs ──▶ load_bq ─┤
-                                                         ▼
-                              [sensor_raw_customers, sensor_raw_sales, sensor_raw_addresses]
-                                                         ▼
-                                                     dbt_deps
-                                                         ▼
-                                                  dbt_run_staging
-                                                         ▼
-                                                  sensor_staging
-                                                         ▼
-                                                 dbt_test_staging
-                                                         ▼
-                                                  dbt_run_marts
-                                                         ▼
-                                                   sensor_mart
-                                                         ▼
-                                                 dbt_test_marts
-                                                         ▼
-                                                 pipeline_complete
-```
-
-Total: 17 tasks, 6 sensors.
-
-### 8.3 Docker setup
-
-Airflow berjalan di Docker dengan 6 containers:
-
-| Container | Image | Port | Fungsi |
-|-----------|-------|------|--------|
-| postgres | postgres:15-alpine | 5432 | Airflow metadata |
-| mysql-source | mysql:8.0 | 3306 | OLTP source (seed data otomatis) |
-| adminer | adminer:4.8.1 | 8080 | Database GUI |
-| airflow-init | custom | — | One-time: migrate DB + create user |
-| airflow-web | custom | 8081 | Airflow UI |
-| airflow-scheduler | custom | — | DAG scheduler |
-
-Custom Dockerfile: packages pre-installed saat build (bukan runtime). Ini mencegah error startup yang terjadi kalau Airflow boot sebelum pip install selesai.
-
----
-
-## 9. Data Quality
-
-### 9.1 Strategi
-
-Data quality diterapkan di dua titik:
-
-| Titik | Tool | Jenis validasi |
-|-------|------|----------------|
-| Post-load (raw) | Airflow PythonSensor | Table exists, row count > 0 |
-| Post-transform (mart) | dbt tests | unique, not_null, accepted_values, relationships, custom SQL |
-
-### 9.2 Masalah data yang teridentifikasi
-
-| Tabel | Kolom | Masalah | Solusi di staging |
-|-------|-------|---------|-------------------|
-| customers_raw | dob | 3 format berbeda (YYYY-MM-DD, YYYY/MM/DD, DD/MM/YYYY) | CASE WHEN + PARSE_DATE |
-| customers_raw | dob | Placeholder 1900-01-01 | Flag `is_dob_suspect = true` |
-| customers_raw | name | "PT Black Bird" = corporate, dob NULL | Flag `customer_type = 'corporate'` |
-| sales_raw | price | String "350.000.000" bukan integer | REPLACE('.','') + CAST INT64 |
-| sales_raw | vin | 2 record same customer+model+date | Flag `is_duplicate_suspect`, dedup via ROW_NUMBER |
-| after_sales_raw | vin | POI1059IIK tidak ada di sales_raw | Flag `is_vin_not_in_sales` |
-| after_sales_raw | service_date | 2026-09-10 = masa depan | Flag `is_future_date` |
-
-Prinsip: raw data TIDAK dimodifikasi. Semua masalah di-FLAG, bukan di-delete. Data lineage tetap traceable.
-
-### 9.3 dbt tests
-
-```yaml
-# Built-in tests
-- unique, not_null (pada semua PK)
-- accepted_values: customer_type ['individual','corporate'], price_class ['LOW','MEDIUM','HIGH']
-- relationships: fact_sales.customer_id → dim_customer.customer_id
-
-# Custom SQL tests
-- assert_revenue_non_negative: fact_sales.price >= 0
-- assert_serving_excludes_invalid: orphan VIN dan future date tidak muncul di serving
-```
-
-### 9.4 Kenapa tidak pakai Great Expectations?
-
-Soal tidak meminta data quality framework khusus. dbt tests sudah mencakup semua validasi yang diperlukan. Great Expectations bisa ditambahkan sebagai future improvement untuk pre-load raw validation, tapi untuk scope project ini, dbt tests cukup dan lebih pragmatis.
-
----
-
-## 10. Infrastructure as Code
-
-### 10.1 Terraform resources
+Satu `terraform apply` dan semuanya siap. Reproducible, version-controlled.
 
 | Resource | Nama | Tujuan |
 |----------|------|--------|
-| GCS bucket | maju-jaya-raw-dev | Staging area untuk file sources |
-| BigQuery dataset | raw_maju | Raw tables (ingestion target) |
-| BigQuery dataset | stg_maju | Staging views (dbt) |
-| BigQuery dataset | mart_maju | Mart tables (dbt) |
-| Service account | sa-pipeline-dev | Pipeline runner (BQ editor + GCS admin) |
-| IAM binding | bigquery.dataEditor | SA bisa write ke BQ |
-| IAM binding | bigquery.user | SA bisa run queries |
-| IAM binding | storage.objectAdmin | SA bisa write ke GCS |
+| GCS bucket | `maju-jaya-raw-dev` | File staging (Excel → Parquet). Auto-move ke Nearline setelah 90 hari. |
+| BigQuery dataset | `raw_maju` | Raw tables — ingestion target. Label: `layer=raw` |
+| BigQuery dataset | `stg_maju` | Staging views — dbt output. Label: `layer=staging` |
+| BigQuery dataset | `mart_maju` | Mart tables + serving — dbt output. Label: `layer=mart` |
+| Service account | `sa-pipeline-dev` | Pipeline runner. Roles: `bigquery.dataEditor`, `bigquery.user`, `storage.objectAdmin` |
 
-### 10.2 Apply
+### Docker services (6 containers)
+
+| Container | Image | Port | Fungsi |
+|-----------|-------|------|--------|
+| `postgres` | postgres:15-alpine | 5432 | Airflow metadata DB |
+| `mysql-source` | mysql:8.0 | 3306 | OLTP simulation (seed data otomatis via `01_init.sql`) |
+| `adminer` | adminer:4.8.1 | 8080 | MySQL GUI untuk browse data |
+| `airflow-init` | custom | — | One-time: `airflow db migrate` + create admin user |
+| `airflow-web` | custom | 8081 | Airflow UI |
+| `airflow-scheduler` | custom | — | DAG scheduler |
+
+**3 design decisions yang mencegah Docker errors:**
+
+1. **Custom Dockerfile** — semua pip packages (18) di-install saat `docker compose build`, bukan saat runtime. Tanpa ini: Airflow boot sebelum pip install selesai → `ModuleNotFoundError` → DAG tidak muncul di UI.
+
+2. **PostgreSQL sebagai Airflow backend** — bukan MySQL. MySQL sebagai Airflow metadata sering error: lock contention pada scheduler tables, utf8mb4 charset migration issues. PostgreSQL proven stable di production Airflow.
+
+3. **`service_completed_successfully` dependency** — `airflow-web` dan `airflow-scheduler` TIDAK start sampai `airflow-init` selesai. Tanpa ini: webserver boot sebelum DB migrate → crash → restart loop.
+
+---
+
+## Cara Menjalankan
+
+### Prerequisites
 
 ```bash
-cd terraform && terraform init && terraform apply
+python3 --version    # >= 3.11
+docker --version     # >= 24.0
+gcloud --version     # >= 450.0
+terraform --version  # >= 1.6
 ```
 
-Satu command, semua GCP resources terbuat. Reproducible, version-controlled, reviewable.
-
----
-
-## 11. Keputusan Arsitektur & Referensi
-
-### 11.1 Ringkasan keputusan
-
-| Keputusan | Pilihan | Alternatif yang tidak dipilih | Alasan |
-|-----------|---------|-------------------------------|--------|
-| MySQL routing | Direct ke BigQuery | Via GCS dulu | BQ storage = GCS price, no benefit |
-| Excel routing | Via GCS, batch load | Direct ke BigQuery | Batch load GRATIS, file backup di GCS |
-| Raw layer ownership | Python/Airflow | dbt | dbt = T dalam ELT, bukan E atau L |
-| Staging materialization | VIEW | TABLE | $0 storage, always fresh |
-| Intermediate materialization | EPHEMERAL | TABLE | $0 storage, logic tetap terpisah |
-| Mart materialization | TABLE | VIEW | Fast reads, partitioning, clustering |
-| GCS sebagai data lake | Hanya file staging | Full data lake | BQ storage = GCS price, no cost benefit |
-| Airflow metadata DB | PostgreSQL | MySQL | PG lebih stable untuk Airflow |
-| Data quality | dbt tests | Great Expectations | Soal tidak minta, dbt tests cukup |
-
-### 11.2 Referensi lengkap
-
-| Source | Apa yang direferensikan | URL |
-|--------|------------------------|-----|
-| Google Cloud Blog | BigQuery data ingestion best practices | cloud.google.com/blog/.../bigquery-explained-data-ingestion |
-| Google Cloud Whitepaper | BigQuery storage vs GCS pricing parity | services.google.com/fh/files/misc/building-a-data-lakehouse.pdf |
-| BigQuery Pricing | Batch load from GCS = free | cloud.google.com/bigquery/pricing |
-| dbt Labs | Best practice workflows, raw layer outside dbt | docs.getdbt.com/best-practices/best-practice-workflows |
-| dbt Labs Blog | Staging models as views best practice | getdbt.com/blog/staging-models-best-practices |
-| Astronomer | ELT reference architecture (Airflow + BigQuery + dbt) | astronomer.io/docs/learn/reference-architecture-elt-bigquery-dbt |
-| Towards Analytics Engineering | dbt project configuration in BigQuery | towardsanalyticsengineering.substack.com |
-| ModelDock | Medallion architecture mapping to dbt | modeldock.run/blog/medallion-architecture-dbt |
-| Astrafy | Data modeling best practices BigQuery + dbt | medium.astrafy.io |
-| Eagle AI | BigQuery as main data layer (migrated from GCS) | eagleeye.com/blog/spark-vs-bigquery-eagle-ai |
-
----
-
-## 12. Cara Menjalankan
-
-### Quick start
+### Step-by-step
 
 ```bash
-# 0. Prerequisites
-gcloud auth login && gcloud config set project maju-jaya-platform
+# ── 1. GCP project ──────────────────────────────────────────
+gcloud auth login
+gcloud config set project maju-jaya-platform
+gcloud services enable bigquery.googleapis.com storage.googleapis.com iam.googleapis.com
 
-# 1. Infrastructure
+# ── 2. Terraform (GCS + BigQuery + IAM) ─────────────────────
 cd terraform && terraform init && terraform apply && cd ..
 
-# 2. Docker (MySQL + Airflow)
-docker compose build && docker compose up -d && sleep 30
+# Service account key
+gcloud iam service-accounts keys create credentials/sa-pipeline-dev.json \
+  --iam-account=sa-pipeline-dev@maju-jaya-platform.iam.gserviceaccount.com
 
-# 3. Ingestion
-python scripts/extract_mysql_to_bigquery.py
-python scripts/extract_excel_to_gcs.py
-python scripts/load_gcs_to_bigquery.py
+# ── 3. Docker (MySQL + Airflow) ─────────────────────────────
+docker compose build        # ~3 menit pertama kali
+docker compose up -d
+sleep 30                    # tunggu MySQL seed data
+make mysql-check            # → customers_raw: 6, sales_raw: 5, after_sales_raw: 3
 
-# 4. dbt
-cd dbt && dbt deps && dbt run --full-refresh && dbt test
-dbt docs generate && dbt docs serve --port 8082
+# ── 4. Verify environment ───────────────────────────────────
+# Adminer: http://localhost:8080 (server: mysql-source, user: maju_jaya)
+# Airflow: http://localhost:8081 (admin/admin) → trigger test_connection DAG → all green
 
-# 5. Airflow
-# http://localhost:8081 → trigger maju_jaya_pipeline → all green
+# ── 5. Ingestion ────────────────────────────────────────────
+python scripts/extract_mysql_to_bigquery.py     # MySQL → BigQuery direct
+python scripts/extract_excel_to_gcs.py          # Excel → GCS (Parquet)
+python scripts/load_gcs_to_bigquery.py          # GCS → BigQuery (free)
+
+# ── 6. dbt ──────────────────────────────────────────────────
+cd dbt
+dbt deps                     # install dbt_utils
+dbt debug                    # "All checks passed!"
+dbt run --full-refresh       # staging views + mart tables created
+dbt test                     # 26 tests passed
+dbt docs generate            # lineage graph
+dbt docs serve --port 8082   # open http://localhost:8082 → screenshot lineage!
+
+# ── 7. Production pipeline ──────────────────────────────────
+# Airflow UI → enable maju_jaya_pipeline → trigger → all 15 tasks green
 ```
 
-### Service URLs
+### Google Drive setup (untuk Excel source)
+
+```bash
+# 1. Enable Drive API
+gcloud services enable drive.googleapis.com
+
+# 2. Share folder ke service account
+#    Google Drive → folder → Share
+#    → sa-pipeline-dev@maju-jaya-platform.iam.gserviceaccount.com (Viewer)
+
+# 3. Set folder ID di .env
+#    URL: https://drive.google.com/drive/folders/ABC123...
+#    .env: GDRIVE_FOLDER_ID=ABC123...
+```
+
+### Services
 
 | Service | URL | Login |
 |---------|-----|-------|
-| Adminer (MySQL GUI) | http://localhost:8080 | server: mysql-source, user: maju_jaya |
+| Adminer (MySQL) | http://localhost:8080 | server: mysql-source, user: maju_jaya |
 | Airflow | http://localhost:8081 | admin / admin |
 | dbt docs | http://localhost:8082 | — |
 
 ---
 
-## 13. Interview Reference
+## Project Structure
 
-### One-liner untuk CV
+```
+maju-jaya-data-platform/
+│
+│   ── FASE 1: Foundation ─────────────────────────────────────
+│
+├── terraform/
+│   ├── main.tf                            GCS + 3 BigQuery datasets + SA + IAM (with outputs)
+│   └── variables.tf                       Configurable defaults (project_id, region, bucket)
+│
+├── docker-compose.yml                     6 services with health checks + init dependency
+├── Dockerfile.airflow                     Custom image: packages pre-installed at build time
+├── requirements.txt                       Local dev: 19 packages (Airflow NOT here — Docker only)
+├── requirements-docker.txt                Airflow container: 18 packages
+├── Makefile                               Shortcut commands (build, up, reset, mysql-check, dbt-debug)
+├── .env                                   Config (GCP project, MySQL creds, GDrive folder ID)
+├── .gitignore                             Protects: credentials/, .env, *.json, .terraform/
+│
+│   ── FASE 2: Ingestion ──────────────────────────────────────
+│
+├── scripts/
+│   ├── 01_init.sql                        MySQL seed data (persis dari soal: 6+5+3 rows)
+│   ├── download_from_gdrive.py            Google Drive API → local data/excel/ (idempotent)
+│   ├── extract_mysql_to_bigquery.py       MySQL → BigQuery direct, WRITE_TRUNCATE
+│   ├── extract_excel_to_gcs.py            Excel → Parquet → GCS (supports --from-drive)
+│   ├── load_gcs_to_bigquery.py            GCS → BigQuery free batch load
+│   └── verify_all.sh                      Pre-push verification (52 checks)
+│
+├── pipelines/
+│   └── ingest_customer_addresses.py       Task 1: daily Excel → MySQL (idempotent + audit trail)
+│
+├── cleaning/
+│   └── clean_tables.py                    Task 2a: 3 MySQL cleaning views (flag, don't delete)
+│
+├── data/excel/
+│   └── customer_addresses_20260301.xlsx   Sample data (4 rows, persis dari soal)
+│
+│   ── FASE 3: Transformation (dbt) ───────────────────────────
+│
+├── dbt/
+│   ├── dbt_project.yml                    Materialization config: view/ephemeral/table per layer
+│   ├── profiles.yml                       BigQuery connection (service account)
+│   ├── packages.yml                       dbt_utils dependency
+│   │
+│   ├── models/staging/                    LAYER 1 — clean, cast, flag (4 VIEWS)
+│   │   ├── _staging__sources.yml              source() declarations + raw data tests
+│   │   ├── _staging__models.yml               model documentation + tests
+│   │   ├── stg_customers.sql                  DOB 3 formats → 1 DATE, customer_type
+│   │   ├── stg_sales.sql                      price string → INT64, duplicate detection
+│   │   ├── stg_after_sales.sql                orphan VIN flag, future date flag
+│   │   └── stg_customer_addresses.sql         ROW_NUMBER dedup, INITCAP casing
+│   │
+│   ├── models/intermediate/               LAYER 2 — join, business logic (2 EPHEMERAL)
+│   │   ├── _intermediate__models.yml          model documentation + tests
+│   │   ├── int_customer_enriched.sql          customer + latest address → full_address
+│   │   └── int_sales_enriched.sql             price class, dedup, periode, customer info
+│   │
+│   ├── models/marts/
+│   │   ├── core/                          LAYER 3a — star schema (4 DIM + 2 FACT TABLES)
+│   │   │   ├── _core__models.yml              documentation + tests + relationship checks
+│   │   │   ├── dim_customer.sql               from int_customer_enriched
+│   │   │   ├── dim_vehicle.sql                derived from sales (no master table)
+│   │   │   ├── dim_date.sql                   generated 2024-2027 (GENERATE_DATE_ARRAY)
+│   │   │   ├── dim_service_type.sql           static seed BP/PM/GR
+│   │   │   ├── fact_sales.sql                 partitioned + clustered, deduplicated
+│   │   │   └── fact_after_sales.sql           DQ flags preserved for audit
+│   │   │
+│   │   └── serving/                       LAYER 3b — pre-aggregated reports (2 TABLES)
+│   │       ├── _serving__models.yml           documentation + tests
+│   │       ├── mart_sales_summary.sql         Task 2b Report 1 (periode, class, model, total)
+│   │       └── mart_aftersales_priority.sql   Task 2b Report 2 (priority HIGH/MED/LOW)
+│   │
+│   └── tests/                             CUSTOM SQL ASSERTIONS (2)
+│       ├── assert_revenue_non_negative.sql    price >= 0 in fact_sales
+│       └── assert_serving_excludes_invalid.sql  no orphan/future in serving
+│
+│   ── FASE 4: Orchestration ──────────────────────────────────
+│
+├── airflow/dags/
+│   ├── maju_jaya_pipeline.py              Production DAG: 15 tasks, 4 sensors (wiring only)
+│   ├── test_connection.py                 Verify: packages, MySQL, dbt debug
+│   └── common/                            Modular shared modules
+│       ├── __init__.py
+│       ├── config.py                          All constants: GCP, datasets, sensor settings
+│       ├── sensors.py                         3 reusable callables (BQ table, GCS file, multi-table)
+│       ├── tasks_ingestion.py                 4 ingestion wrappers (MySQL, GDrive, Excel, GCS→BQ)
+│       └── callbacks.py                       on_failure + on_success hooks
+│
+│   ── FASE 5: Documentation ──────────────────────────────────
+│
+├── docs/architecture/
+│   ├── ARCHITECTURE_DECISION.md           10 decisions with industry references
+│   └── DATA_DICTIONARY.md                 Column-level definitions per layer
+│
+└── README.md                              This file
+```
 
-> Built an end-to-end data platform for automotive retail: ingested MySQL and Excel sources into BigQuery, transformed data using dbt with a 4-layer architecture (staging → intermediate → marts), designed a star schema warehouse, and orchestrated daily pipelines with Airflow using PythonSensors for data verification.
-
-### Pertanyaan yang mungkin ditanya
-
-**"Kenapa MySQL tidak lewat GCS?"**
-> Karena BigQuery storage dan GCS Standard harganya sama ($0.020/GB/month). Untuk structured database data, GCS hanya menambah complexity tanpa benefit. Google Cloud sendiri menyediakan Datastream yang langsung MySQL → BigQuery.
-
-**"Kenapa staging pakai view?"**
-> dbt Labs merekomendasikan staging layer sebagai views. Zero storage cost, selalu fresh. Staging hanya rename/cast — tidak ada heavy computation yang butuh pre-materialization.
-
-**"Kenapa intermediate ephemeral, bukan table?"**
-> Intermediate adalah workspace internal — tidak ada BI tool yang query langsung. Ephemeral = CTE di query mart, hemat storage. Tapi logic tetap di file terpisah, jadi lineage traceable. Kalau performance jadi masalah, bisa upgrade ke table.
-
-**"Kenapa pakai dbt, bukan raw SQL?"**
-> dbt memberikan lineage graph otomatis, built-in testing (unique, not_null, accepted_values), documentation via `dbt docs serve`, dan modular SQL yang versioned di git. Raw SQL bisa achieve hal yang sama, tapi butuh tooling sendiri untuk testing, docs, dan lineage.
-
-**"Gimana handle data quality?"**
-> Dua layer: sensors di Airflow verify data exists sebelum dbt jalan, dan dbt tests validate integrity setelah transform. Custom SQL assertions compare mart vs raw untuk detect data loss.
-
-**"Kenapa Airflow pakai PostgreSQL backend?"**
-> MySQL sebagai Airflow metadata database sering error karena lock contention pada metadata tables dan utf8mb4 charset issues. PostgreSQL proven stable dan ini pattern yang dipakai di production Airflow deployments.
+**52 files total:** 13 Python · 17 SQL (1011 lines) · 9 YAML · 3 Markdown · 10 config/other
 
 ---
 
-## License
+## dbt Lineage Graph
 
-MIT License. Built for AstraWorld Data Engineer technical test.
+```
+                    ┌─────────────────── raw_maju (source, not dbt) ───────────────────┐
+                    │                                                                    │
+          ┌─────────┼──────────┬────────────────┐                                       │
+          ▼         ▼          ▼                ▼                                       │
+   stg_customers  stg_sales  stg_after_sales  stg_customer_addresses                   │
+          │         │          │                │                                       │
+          │         │          │                │         ┌─────────────────────────────┘
+          ▼         ▼          │                ▼         │
+   int_customer_enriched   int_sales_enriched  │         │
+          │                    │          │     │         │
+          ▼                    ▼          ▼     ▼         │
+   dim_customer         fact_sales   dim_vehicle          │
+          │                │                              │
+          │                ▼                              │
+          │         mart_sales_summary                    │
+          │                                               │
+          ▼                                               ▼
+   mart_aftersales_priority  ◄──────────────── fact_after_sales
+```
+
+Chain lengkap: `raw` → `stg` (views) → `int` (ephemeral CTE) → `mart` (tables) → `serving` (tables).
+
+Untuk melihat lineage interaktif dengan clickable nodes:
+```bash
+cd dbt && dbt docs generate && dbt docs serve --port 8082
+```
+
+---
+
+## Keputusan Arsitektur
+
+| # | Keputusan | Pilihan | Alasan singkat |
+|---|-----------|---------|----------------|
+| 1 | MySQL → ? | BigQuery direct | BQ storage = GCS price. Tidak ada benefit lewat GCS untuk structured data. |
+| 2 | Excel → ? | GCS → BigQuery | Batch load gratis. File backup di GCS. |
+| 3 | Raw layer by? | Python/Airflow | dbt = Transform only. Boundary jelas. |
+| 4 | Staging mat? | VIEW | $0 storage, selalu fresh. dbt Labs recommendation. |
+| 5 | Intermediate mat? | EPHEMERAL | CTE only. Logic terpisah tapi tidak persist. |
+| 6 | Marts mat? | TABLE | Fast reads. Partitioned by date, clustered by filter cols. |
+| 7 | GCS role? | File staging only | BigQuery = single source of truth. |
+| 8 | Airflow backend? | PostgreSQL | MySQL lock contention issues. |
+| 9 | DAG structure? | Modular common/ | Testable, DRY. DAG file = wiring only. |
+| 10 | Data quality? | dbt tests (26) | Built-in + custom SQL. Sufficient tanpa Great Expectations. |
+
+Detail lengkap dengan referensi industry: **[docs/architecture/ARCHITECTURE_DECISION.md](docs/architecture/ARCHITECTURE_DECISION.md)**
+
+---
+
+## Apa yang Bisa Dipelajari dari Project Ini
+
+Kalau kamu belajar data engineering dari project ini, ini konsep-konsep yang diterapkan:
+
+**ELT Pattern:** Extract dan Load dulu ke warehouse (BigQuery), baru Transform di dalam warehouse (dbt). Berbeda dengan ETL tradisional yang transform di luar warehouse. ELT memanfaatkan compute power warehouse yang sudah scalable.
+
+**Medallion Architecture:** Data melewati tahap bronze (raw) → silver (staging + intermediate) → gold (marts). Setiap tahap menambah kualitas. Konsep ini dari Databricks tapi diadaptasi ke dbt layers.
+
+**Separation of Concerns:** Ingestion (Python) dan transformation (dbt) punya boundary yang jelas di dataset `raw_maju`. Kalau ingestion gagal → debug Python. Kalau transform gagal → debug dbt. Tidak campur.
+
+**Idempotency:** Setiap komponen aman dijalankan ulang. BigQuery `WRITE_TRUNCATE` menghapus dan mengganti. dbt `--full-refresh` rebuild dari nol. Airflow retry otomatis. Pipeline `ingest_customer_addresses.py` skip file yang sudah di-load.
+
+**Star Schema:** Fact tables menyimpan events (penjualan, servis). Dimension tables menyimpan entities (customer, kendaraan, tanggal). BI tools optimal dengan pattern ini — query hanya 1 JOIN.
+
+**Materialization Strategy:** Tiap layer punya materialization yang tepat: view (gratis, fresh) untuk staging, ephemeral (CTE) untuk intermediate, table (fast, partitioned) untuk marts. Bukan random pilih — ada alasan cost dan performance.
+
+**Sensor-Gated Pipeline:** Setiap layer transition punya sensor yang verifikasi data ada sebelum lanjut. Ini mencegah silent failures: pipeline "sukses" tapi data kosong.
+
+**Flag, Don't Delete:** Data quality issues di-flag dengan boolean columns, bukan dihapus. Raw data preserved. Serving layer yang filter. Ini best practice untuk traceability dan audit.
+
+---
+
+## Referensi
+
+| Source | Apa yang direferensikan |
+|--------|------------------------|
+| Google Cloud Lakehouse whitepaper | BQ storage = GCS price, no separate storage justification |
+| Google Cloud BigQuery pricing | Batch load from GCS = free |
+| Google Cloud BigQuery ingestion guide | GCS recommended for batch file sources |
+| dbt Labs — Best practice workflows | Raw layer outside dbt, source() vs ref() |
+| dbt Labs — Staging models best practices | Staging as views, 1 source = 1 model |
+| dbt Labs — How we structure our dbt projects | 3-layer: staging, intermediate, marts |
+| Astronomer — ELT reference architecture | Airflow + BigQuery + dbt, PostgreSQL backend |
+| Astrafy — BigQuery + dbt modeling | Materialization per layer, dataset naming |
+| ModelDock — Medallion architecture with dbt | Bronze/silver/gold mapping to dbt layers |
+| Eagle AI — Spark vs BigQuery | BigQuery as main data layer (migrated from GCS) |
+| Towards Analytics Engineering | dbt project configuration in BigQuery |
+
+---
 
 ## Author
 
 **Fahern Khan** · [GitHub](https://github.com/fahernkhan) · [LinkedIn](https://linkedin.com/in/fahernkhan)
+
+## License
+
+MIT
