@@ -624,47 +624,6 @@ cd dbt && dbt docs generate && dbt docs serve --port 8082
 
 ---
 
-## Keputusan Arsitektur
-
-| # | Keputusan | Pilihan | Alasan singkat |
-|---|-----------|---------|----------------|
-| 1 | MySQL → ? | BigQuery direct | BQ storage = GCS price. Tidak ada benefit lewat GCS untuk structured data. |
-| 2 | Excel → ? | GCS → BigQuery | Batch load gratis. File backup di GCS. |
-| 3 | Raw layer by? | Python/Airflow | dbt = Transform only. Boundary jelas. |
-| 4 | Staging mat? | VIEW | $0 storage, selalu fresh. dbt Labs recommendation. |
-| 5 | Intermediate mat? | EPHEMERAL | CTE only. Logic terpisah tapi tidak persist. |
-| 6 | Marts mat? | TABLE | Fast reads. Partitioned by date, clustered by filter cols. |
-| 7 | GCS role? | File staging only | BigQuery = single source of truth. |
-| 8 | Airflow backend? | PostgreSQL | MySQL lock contention issues. |
-| 9 | DAG structure? | Modular common/ | Testable, DRY. DAG file = wiring only. |
-| 10 | Data quality? | dbt tests (26) | Built-in + custom SQL. Sufficient tanpa Great Expectations. |
-
-Detail lengkap dengan referensi industry: **[docs/architecture/ARCHITECTURE_DECISION.md](docs/architecture/ARCHITECTURE_DECISION.md)**
-
----
-
-## Apa yang Bisa Dipelajari dari Project Ini
-
-Kalau kamu belajar data engineering dari project ini, ini konsep-konsep yang diterapkan:
-
-**ELT Pattern:** Extract dan Load dulu ke warehouse (BigQuery), baru Transform di dalam warehouse (dbt). Berbeda dengan ETL tradisional yang transform di luar warehouse. ELT memanfaatkan compute power warehouse yang sudah scalable.
-
-**Medallion Architecture:** Data melewati tahap bronze (raw) → silver (staging + intermediate) → gold (marts). Setiap tahap menambah kualitas. Konsep ini dari Databricks tapi diadaptasi ke dbt layers.
-
-**Separation of Concerns:** Ingestion (Python) dan transformation (dbt) punya boundary yang jelas di dataset `raw_maju`. Kalau ingestion gagal → debug Python. Kalau transform gagal → debug dbt. Tidak campur.
-
-**Idempotency:** Setiap komponen aman dijalankan ulang. BigQuery `WRITE_TRUNCATE` menghapus dan mengganti. dbt `--full-refresh` rebuild dari nol. Airflow retry otomatis. Pipeline `ingest_customer_addresses.py` skip file yang sudah di-load.
-
-**Star Schema:** Fact tables menyimpan events (penjualan, servis). Dimension tables menyimpan entities (customer, kendaraan, tanggal). BI tools optimal dengan pattern ini — query hanya 1 JOIN.
-
-**Materialization Strategy:** Tiap layer punya materialization yang tepat: view (gratis, fresh) untuk staging, ephemeral (CTE) untuk intermediate, table (fast, partitioned) untuk marts. Bukan random pilih — ada alasan cost dan performance.
-
-**Sensor-Gated Pipeline:** Setiap layer transition punya sensor yang verifikasi data ada sebelum lanjut. Ini mencegah silent failures: pipeline "sukses" tapi data kosong.
-
-**Flag, Don't Delete:** Data quality issues di-flag dengan boolean columns, bukan dihapus. Raw data preserved. Serving layer yang filter. Ini best practice untuk traceability dan audit.
-
----
-
 ## Referensi
 
 | Source | Apa yang direferensikan |
