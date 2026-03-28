@@ -58,7 +58,8 @@ Thumbs.db
 # ── EDITOR ──────────────────────────────────
 .vscode/
 .idea/
-/home/fahernkhan/Documents/data_engineer/maju-jaya-data-platform/dbt/profiles.ymlprofiles.yml
+/home/fahernkhan/Documents/data_engineer/maju-jaya-data-platform/dbt/profiles.yml
+profiles.yml
 
 # DBT SECRET
 dbt/profiles.yml
