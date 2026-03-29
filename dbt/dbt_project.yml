@@ -11,6 +11,7 @@ models:
       +materialized: ephemeral
 
     marts:
+      +schema: mart_maju      
       core:
         +materialized: table
       serving:
