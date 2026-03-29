@@ -4,7 +4,7 @@
   Job: Cast price dari string ke integer, flag duplicates
 */
 
-WITH source AS (SELECT * FROM {{ source('raw_maju', 'sales') }}),
+WITH source AS (SELECT * FROM {{ source('raw_maju', 'raw_sales') }}),
 cleaned AS (
     SELECT vin, CAST(customer_id AS INT64) AS customer_id, model,
         CAST(invoice_date AS DATE) AS invoice_date,

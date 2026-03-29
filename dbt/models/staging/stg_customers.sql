@@ -5,7 +5,7 @@
   Rule: 1:1 dengan source, tidak ada join
 */
 
-WITH source AS (SELECT * FROM {{ source('raw_maju', 'customers') }})
+WITH source AS (SELECT * FROM {{ source('raw_maju', 'raw_customers') }})
 SELECT
     CAST(id AS INT64) AS customer_id,
     name AS customer_name,

@@ -5,7 +5,7 @@
 */
 
 WITH source AS (
-    SELECT * FROM {{ source('raw_maju', 'customer_addresses') }}
+    SELECT * FROM {{ source('raw_maju', 'raw_customer_addresses') }}
 ),
 ranked AS (
     SELECT *,

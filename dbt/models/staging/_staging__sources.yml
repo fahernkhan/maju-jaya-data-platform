@@ -5,16 +5,16 @@ sources:
     database: olist-platform
     schema: raw_maju
     tables:
-      - name: customers
+      - name: raw_customers
         columns:
           - name: id
             tests: [unique, not_null]
-      - name: sales
+      - name: raw_sales
         columns:
           - name: vin
             tests: [unique, not_null]
-      - name: after_sales
+      - name: raw_after_sales
         columns:
           - name: service_ticket
             tests: [unique, not_null]
-      - name: customer_addresses
+      - name: raw_customer_addresses

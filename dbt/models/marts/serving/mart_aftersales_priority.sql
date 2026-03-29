@@ -23,12 +23,13 @@ WITH valid_services AS (
 
 aggregated AS (
     SELECT
-        YEAR(a.date_id)         AS periode,
+        EXTRACT(YEAR FROM a.date_id)        AS periode,
         a.vin,
         a.customer_id,
         COUNT(a.service_ticket) AS count_service
     FROM valid_services a
-    GROUP BY YEAR(a.date_id), a.vin, a.customer_id
+    GROUP BY EXTRACT(YEAR FROM a.date_id)
+    , a.vin, a.customer_id
 )
 
 SELECT
