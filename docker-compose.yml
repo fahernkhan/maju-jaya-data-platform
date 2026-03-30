@@ -41,6 +41,8 @@ x-airflow-common: &airflow-common
 
     # ── GCP ──
     AIRFLOW_GOOGLE_APPLICATION_CREDENTIALS: ${AIRFLOW_GOOGLE_APPLICATION_CREDENTIALS}
+    #OVERRIDE DARI .ENV ibaratnya nulis lagi tetep dari bawah ke atas
+    GOOGLE_APPLICATION_CREDENTIALS: ${AIRFLOW_GOOGLE_APPLICATION_CREDENTIALS}
     GCP_PROJECT_ID: ${GCP_PROJECT_ID}
     GCS_BUCKET_RAW: ${GCS_BUCKET_RAW}
     BQ_DATASET_RAW: ${BQ_DATASET_RAW}
@@ -66,7 +68,8 @@ x-airflow-common: &airflow-common
     - ./dbt:/opt/airflow/dbt
     - ./data:/opt/airflow/data
     - ./data_quality:/opt/airflow/data_quality
-    - ./credentials:/opt/credentials:ro
+    # - ./credentials:/opt/credentials:ro
+    - ./credentials:/opt/airflow/credentials:ro
 
   depends_on:
     postgres:

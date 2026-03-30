@@ -31,9 +31,10 @@ dbt test --select marts
 echo "=== [5/5] FULL TEST SUITE ==="
 dbt test
 
-Lihat lineage graph
+# Lihat lineage graph
+dbt docs generate
 dbt docs serve --port 8082
 
-##local
-export $(grep -v '^#' .env | xargs)
-dbt run
+## local harus set export creds kalau mau setara airflow:
+set -a && source .env && set +a
+echo $DBT_GOOGLE_APPLICATION_CREDENTIALS
