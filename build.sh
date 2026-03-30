@@ -37,4 +37,5 @@ dbt docs serve --port 8082
 
 ## local harus set export creds kalau mau setara airflow:
 set -a && source .env && set +a
+cd .. && set -a && source .env && set +a && cd dbt
 echo $DBT_GOOGLE_APPLICATION_CREDENTIALS
