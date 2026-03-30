@@ -13,6 +13,7 @@ import pandas as pd
 from sqlalchemy import create_engine
 from google.cloud import bigquery
 from dotenv import load_dotenv
+from google.oauth2 import service_account
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
 
@@ -26,13 +27,41 @@ BQ_TABLE       = "raw_after_sales"
 SOURCE_TABLE   = "after_sales_raw"
 INGESTION_DATE = date.today().isoformat()
 
+def get_mysql_host():
+    """
+    Auto switch:
+    - Airflow (Docker) → mysql-source
+    - Local → 127.0.0.1
+    """
+    return "mysql-source" if os.getenv("AIRFLOW_HOME") else "127.0.0.1"
+
+
 DB_URL = (
     f"mysql+pymysql://{os.getenv('MYSQL_USER')}:{os.getenv('MYSQL_PASSWORD')}"
-    f"@{os.getenv('MYSQL_HOST')}:{os.getenv('MYSQL_PORT')}/{os.getenv('MYSQL_DB')}"
+    f"@{get_mysql_host()}:{os.getenv('MYSQL_PORT')}/{os.getenv('MYSQL_DB')}"
 )
 
 
 # ── PIPELINE ─────────────────────────────────────────────────────
+def get_sa_path():
+    is_airflow = os.getenv("AIRFLOW_HOME") is not None
+
+    if is_airflow:
+        path = os.getenv("AIRFLOW_GOOGLE_APPLICATION_CREDENTIALS")
+    else:
+        path = os.getenv("LOCAL_GOOGLE_APPLICATION_CREDENTIALS")
+
+    if not path:
+        raise ValueError("Credential env tidak ditemukan")
+
+    return path
+
+
+def gcp_creds():
+    return service_account.Credentials.from_service_account_file(
+        get_sa_path(),
+        scopes=["https://www.googleapis.com/auth/cloud-platform"],
+    )
 
 def read_from_mysql() -> pd.DataFrame:
     """Baca tabel dari MySQL as-is. Hanya tambah metadata."""
@@ -48,7 +77,7 @@ def read_from_mysql() -> pd.DataFrame:
 
 def load_to_bigquery(df: pd.DataFrame) -> int:
     """DataFrame → BigQuery direct. WRITE_TRUNCATE = idempotent."""
-    bq        = bigquery.Client(project=GCP_PROJECT)
+    bq        = bigquery.Client(project=GCP_PROJECT, credentials=gcp_creds())
     table_ref = f"{GCP_PROJECT}.{BQ_DATASET}.{BQ_TABLE}"
 
     job = bq.load_table_from_dataframe(

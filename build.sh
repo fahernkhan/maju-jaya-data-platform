@@ -30,3 +30,10 @@ dbt test --select marts
 # ── LAYER 3: FULL TEST ──────────────────────────────────────
 echo "=== [5/5] FULL TEST SUITE ==="
 dbt test
+
+Lihat lineage graph
+dbt docs serve --port 8082
+
+##local
+export $(grep -v '^#' .env | xargs)
+dbt run
